@@ -18,11 +18,7 @@
 package com.netflix.hollow.api.producer;
 
 
-import java.io.BufferedOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 
 import com.netflix.hollow.api.StateTransition;
 import com.netflix.hollow.core.read.engine.HollowReadStateEngine;
@@ -76,39 +72,39 @@ public class HollowProducer {
 
     private void publish(WriteState writeState) throws IOException {
         HollowBlobWriter writer = new HollowBlobWriter(writeEngine);
+        StateTransition transition = writeState.getTransition();
 
-
-        File snapshotFile = publisher.openSnapshot(announced.getToVersion());
-        File deltaFile = publisher.openDelta(announced.getFromVersion(), announced.getToVersion());
-        File reverseDeltaFile = publisher.openReverseDelta(announced.getFromVersion(), announced.getToVersion());
-
-        try(OutputStream os = new BufferedOutputStream(new FileOutputStream(snapshotFile))) {
-            writer.writeSnapshot(os);
-        }
-
-        if(announced.isDelta()) {
-
-            try(OutputStream os = new BufferedOutputStream(new FileOutputStream(deltaFile))) {
-                writer.writeDelta(os);
-            }
-
-            try(OutputStream os = new BufferedOutputStream(new FileOutputStream(reverseDeltaFile))) {
-                writer.writeReverseDelta(os);
-            }
-
-            publisher.publishDelta(deltaFile, announced.getFromVersion(), announced.getToVersion());
-            publisher.publishReverseDelta(reverseDeltaFile, announced.getFromVersion(), announced.getToVersion());
-
-            deltaFile.delete();
-            reverseDeltaFile.delete();
-        }
-
+        HollowBlob snapshot = publisher.openSnapshot(transition);
         try {
+            writer.writeSnapshot(snapshot.getOutputStream());
+            snapshot.finish();
+
+            if(transition.isDelta()) {
+                HollowBlob delta = publisher.openDelta(transition);
+                HollowBlob reverseDelta = publisher.openReverseDelta(transition);
+                try {
+                    writer.writeDelta(delta.getOutputStream());
+                    delta.finish();
+
+                    writer.writeReverseDelta(reverseDelta.getOutputStream());
+                    reverseDelta.finish();
+
+                    publisher.publish(delta);
+                    publisher.publish(reverseDelta);
+                } finally {
+                    delta.close();
+                    reverseDelta.close();
+                }
+            }
+
             /// it's ok to fail to publish a snapshot, as long as you don't miss too many in a row.
             /// you can add a timeout or even do this in a separate thread.
-            publisher.publishSnapshot(snapshotFile, announced.getToVersion());
-            snapshotFile.delete();
-        } catch(Throwable ignore) { }
+            publisher.publish(snapshot);
+        } catch(Throwable ignore) {
+            // TODO: timt: log and notify listerners
+        } finally {
+            snapshot.close();
+        }
     }
 
     private void rollback() {
